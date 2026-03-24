@@ -59,8 +59,7 @@ def load_data(path) -> pd.DataFrame:
         "Startdatum": "start_date", "Start Date": "start_date", "Datum": "start_date",
         "Startzeit": "start_time", "Start Time": "start_time",
         "Dauer (Dezimalzahl)": "duration_h", "Duration (decimal)": "duration_h",
-        "Dauer (dezimal)": "duration_h",
-        "Dauer (h)": "duration_h",
+        "Dauer (dezimal)": "duration_h", "Dauer (h)": "duration_h",
     }
     df.rename(columns={k: v for k, v in col_map.items() if k in df.columns}, inplace=True)
 
@@ -70,13 +69,17 @@ def load_data(path) -> pd.DataFrame:
                 df.rename(columns={c: "duration_h"}, inplace=True)
                 break
 
-    df["duration_h"] = (
-        df["duration_h"]
-        .astype(str)
-        .str.replace(",", ".", regex=False)
-        .pipe(pd.to_numeric, errors="coerce")
-        .fillna(0)
-    )
+    # Dauer robust parsen – egal ob float, int oder String mit Komma
+    raw_dur = df["duration_h"]
+    if pd.api.types.is_numeric_dtype(raw_dur):
+        df["duration_h"] = pd.to_numeric(raw_dur, errors="coerce").fillna(0)
+    else:
+        df["duration_h"] = (
+            raw_dur.astype(str)
+            .str.replace(",", ".", regex=False)
+            .pipe(pd.to_numeric, errors="coerce")
+            .fillna(0)
+        )
 
     if "start_date" in df.columns:
         df["date"] = pd.to_datetime(df["start_date"], dayfirst=True, errors="coerce")
@@ -92,7 +95,6 @@ def load_data(path) -> pd.DataFrame:
         df["hour"] = pd.to_datetime(
             df["start_time"].astype(str), format="%H:%M", errors="coerce"
         ).dt.hour
-        # fallback: H:M:S
         mask = df["hour"].isna()
         df.loc[mask, "hour"] = pd.to_datetime(
             df.loc[mask, "start_time"].astype(str), format="%H:%M:%S", errors="coerce"
@@ -125,7 +127,13 @@ def load_data(path) -> pd.DataFrame:
 # ─────────────────────────────────────────────
 # SIDEBAR
 # ─────────────────────────────────────────────
-st.sidebar.markdown("# ⏱️ Clockify Insights")
+st.sidebar.markdown("""
+<div style="background: linear-gradient(135deg, #2d6a9f 0%, #1e3a5f 100%);
+            padding: 16px 20px; border-radius: 12px; margin-bottom: 12px;">
+    <span style="color:white; font-size:1.4rem; font-weight:700;">⏱️ Clockify Insights</span><br>
+    <span style="color:rgba(255,255,255,0.7); font-size:0.75rem;">Zeiterfassung · Analyse · Überblick</span>
+</div>
+""", unsafe_allow_html=True)
 st.sidebar.markdown("---")
 
 uploaded = st.sidebar.file_uploader("📁 Clockify CSV hochladen", type=["csv"])
@@ -397,8 +405,7 @@ with tabs[2]:
         .fillna(0)
     )
     fig = px.imshow(heatmap_data, color_continuous_scale="Blues",
-                    labels={"color": "Stunden"},
-                    aspect="auto")
+                    labels={"color": "Stunden"}, aspect="auto")
     fig.update_layout(height=max(400, len(heatmap_data) * 30))
     st.plotly_chart(fig, use_container_width=True)
 
@@ -563,7 +570,7 @@ with tabs[5]:
             .sort_values(ascending=False).head(12).reset_index()
         )
         if int_proj.empty:
-            st.info("Keine internen Buchungen gefunden.")
+            st.info("Keine internen Buchungen gefunden. Prüfe den Kundennamen (Stichwort: 'intern', 'internal' oder Firmenname).")
         else:
             fig = px.pie(int_proj, values="duration_h", names="project",
                          color_discrete_sequence=PALETTE, hole=0.4)
