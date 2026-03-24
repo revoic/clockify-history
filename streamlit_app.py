@@ -4,14 +4,14 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import numpy as np
-import warnings
-warnings.filterwarnings('ignore')
+from collections import Counter
+import re
 
 # ─────────────────────────────────────────────
 # PAGE CONFIG
 # ─────────────────────────────────────────────
 st.set_page_config(
-    page_title="REVOIC · Clockify Insights",
+    page_title="Clockify Insights",
     page_icon="⏱️",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -23,31 +23,17 @@ st.set_page_config(
 st.markdown("""
 <style>
     .metric-card {
-        background: linear-gradient(135deg, #1e3a5f 0%, #2d6a9f 100%);
-        border-radius: 12px;
-        padding: 20px;
+        background: linear-gradient(135deg, #2d6a9f 0%, #1e3a5f 100%);
         color: white;
-        text-align: center;
-        box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        padding: 1rem 1.5rem;
+        border-radius: 12px;
+        margin-bottom: 0.5rem;
     }
-    .metric-card h2 { font-size: 2.2rem; margin: 0; font-weight: 700; }
-    .metric-card p  { font-size: 0.9rem; margin: 4px 0 0 0; opacity: 0.85; }
-    .section-header {
-        font-size: 1.4rem;
-        font-weight: 700;
-        color: #1e3a5f;
-        border-left: 5px solid #2d6a9f;
-        padding-left: 12px;
-        margin: 24px 0 12px 0;
-    }
-    .fun-box {
-        background: #fff8e1;
-        border-left: 5px solid #f9a825;
-        border-radius: 8px;
-        padding: 16px;
-        margin: 8px 0;
-    }
-    [data-testid="metric-container"] { background: #f0f4fa; border-radius: 10px; padding: 12px; }
+    .metric-card h3 { margin: 0; font-size: 0.85rem; opacity: 0.8; }
+    .metric-card h1 { margin: 0; font-size: 2rem; font-weight: 700; }
+    .metric-card p  { margin: 0; font-size: 0.75rem; opacity: 0.7; }
+    .stTabs [data-baseweb="tab"] { font-size: 0.9rem; font-weight: 600; }
+    h1, h2, h3 { color: #1e3a5f; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -55,69 +41,172 @@ st.markdown("""
 # DATA LOADING
 # ─────────────────────────────────────────────
 @st.cache_data
-def load_data(path: str) -> pd.DataFrame:
-    df = pd.read_csv(path, low_memory=False)
-    df['Startdatum'] = pd.to_datetime(df['Startdatum'], dayfirst=True, errors='coerce')
-    df['Enddatum']   = pd.to_datetime(df['Enddatum'],   dayfirst=True, errors='coerce')
-    df['Jahr']       = df['Startdatum'].dt.year
-    df['Monat']      = df['Startdatum'].dt.to_period('M').astype(str)
-    df['Quartal']    = df['Startdatum'].dt.to_period('Q').astype(str)
-    df['Wochentag']  = df['Startdatum'].dt.day_name()
-    df['Stunde']     = df['Startzeit'].str[:2].astype(float, errors='ignore')
-    df['Abrechenbar_bool'] = df['Abrechenbar'].str.strip() == 'Ja'
-    df['Intern']     = df['Kunde'].str.strip().str.upper() == 'REVOIC'
-    df['Dauer (dezimal)'] = pd.to_numeric(df['Dauer (dezimal)'], errors='coerce').fillna(0)
-    # Clean up old/ALT projects for display
-    df['Projekt_clean'] = df['Projekt'].str.replace(r'^\(Alt\)\s*', '', regex=True).str.strip()
+def load_data(path) -> pd.DataFrame:
+    try:
+        df = pd.read_csv(path, low_memory=False)
+    except Exception as e:
+        st.error(f"Fehler beim Laden der Datei: {e}")
+        st.stop()
+
+    df.columns = df.columns.str.strip()
+
+    # Spalten-Mapping Deutsch → intern
+    col_map = {
+        # Benutzer
+        "Benutzer": "user", "User": "user", "Nutzer": "user",
+        # Kunde
+        "Kunde": "client", "Client": "client",
+        # Projekt
+        "Projekt": "project", "Project": "project",
+        # Beschreibung
+        "Beschreibung": "description", "Description": "description",
+        # Abrechenbar
+        "Abrechenbar": "billable", "Billable": "billable",
+        # Startdatum
+        "Startdatum": "start_date", "Start Date": "start_date", "Datum": "start_date",
+        # Startzeit
+        "Startzeit": "start_time", "Start Time": "start_time",
+        # Dauer (Dezimal)
+        "Dauer (Dezimalzahl)": "duration_h", "Duration (decimal)": "duration_h",
+        "Dauer (h)": "duration_h",
+    }
+    df.rename(columns={k: v for k, v in col_map.items() if k in df.columns}, inplace=True)
+
+    # Dauer sicherstellen
+    if "duration_h" not in df.columns:
+        for c in df.columns:
+            if "dauer" in c.lower() or "duration" in c.lower():
+                df.rename(columns={c: "duration_h"}, inplace=True)
+                break
+
+    df["duration_h"] = (
+        df["duration_h"]
+        .astype(str)
+        .str.replace(",", ".", regex=False)
+        .pipe(pd.to_numeric, errors="coerce")
+        .fillna(0)
+    )
+
+    # Datum parsen
+    if "start_date" in df.columns:
+        df["date"] = pd.to_datetime(df["start_date"], dayfirst=True, errors="coerce")
+    else:
+        df["date"] = pd.NaT
+
+    df["year"]    = df["date"].dt.year
+    df["month"]   = df["date"].dt.to_period("M").astype(str)
+    df["quarter"] = df["date"].dt.to_period("Q").astype(str)
+    df["weekday"] = df["date"].dt.day_name()
+    df["hour"]    = df["date"].dt.hour if "start_time" not in df.columns else None
+
+    if "start_time" in df.columns:
+        df["hour"] = pd.to_datetime(
+            df["start_time"].astype(str), format="%H:%M:%S", errors="coerce"
+        ).dt.hour
+
+    # Abrechenbar normalisieren
+    if "billable" in df.columns:
+        df["billable"] = df["billable"].astype(str).str.strip().str.lower()
+        df["is_billable"] = df["billable"].isin(["ja", "yes", "true", "1", "wahr"])
+    else:
+        df["is_billable"] = False
+
+    # Intern-Flag (Kunde enthält eigenen Firmennamen)
+    if "client" in df.columns:
+        df["client"] = df["client"].fillna("Kein Kunde").astype(str).str.strip()
+        internal_keywords = ["intern", "internal", "revoic", "eigene", "administration"]
+        df["is_internal"] = df["client"].str.lower().str.contains(
+            "|".join(internal_keywords), na=False
+        )
+    else:
+        df["client"] = "Unbekannt"
+        df["is_internal"] = False
+
+    if "project" not in df.columns:
+        df["project"] = "Unbekannt"
+    else:
+        df["project"] = df["project"].fillna("Kein Projekt").astype(str).str.strip()
+
+    if "user" not in df.columns:
+        df["user"] = "Unbekannt"
+    else:
+        df["user"] = df["user"].fillna("Unbekannt").astype(str).str.strip()
+
+    if "description" not in df.columns:
+        df["description"] = ""
+    else:
+        df["description"] = df["description"].fillna("").astype(str)
+
     return df
 
 # ─────────────────────────────────────────────
-# SIDEBAR – FILE + FILTERS
+# SIDEBAR
 # ─────────────────────────────────────────────
-st.sidebar.image("https://via.placeholder.com/200x60/1e3a5f/ffffff?text=REVOIC+Insights", width=200)
-st.sidebar.title("⚙️ Einstellungen")
+st.sidebar.image(
+    "https://via.placeholder.com/240x60/2d6a9f/ffffff?text=⏱️+Clockify+Insights",
+    use_container_width=True,
+)
+st.sidebar.markdown("---")
 
 uploaded = st.sidebar.file_uploader("📁 Clockify CSV hochladen", type=["csv"])
-default_path = "/mnt/data/Clockify_Zeitbericht_Detailliert_01.01.2022-28.02.2026.csv"
 
-if uploaded:
-    df_raw = load_data(uploaded)
-else:
-    df_raw = load_data(default_path)
+if not uploaded:
+    st.markdown("## ⏱️ Clockify Insights")
+    st.info(
+        "👆 Bitte lade in der **Sidebar links** eine Clockify-CSV-Datei hoch.\n\n"
+        "**Export-Weg in Clockify:** Berichte → Detailliert → CSV exportieren"
+    )
+    st.stop()
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("🔍 Filter")
+df_raw = load_data(uploaded)
 
-years = sorted(df_raw['Jahr'].dropna().unique().astype(int).tolist())
-sel_years = st.sidebar.multiselect("Jahr", years, default=years)
+# ── Filter ──
+st.sidebar.markdown("### 🔍 Filter")
 
-users = sorted(df_raw['Benutzer'].dropna().unique().tolist())
-sel_users = st.sidebar.multiselect("Mitarbeitende", users, default=users)
+years = sorted(df_raw["year"].dropna().unique().astype(int).tolist())
+sel_years = st.sidebar.multiselect("Jahr(e)", years, default=years)
 
-clients = sorted(df_raw['Kunde'].dropna().unique().tolist())
-sel_clients = st.sidebar.multiselect("Kunden", clients, default=clients)
+all_users = sorted(df_raw["user"].unique().tolist())
+sel_users = st.sidebar.multiselect("Mitarbeiter:in", all_users, default=all_users)
+
+all_clients = sorted(df_raw["client"].unique().tolist())
+sel_clients = st.sidebar.multiselect("Kunde", all_clients, default=all_clients)
 
 granularity = st.sidebar.radio("Zeitgranularität", ["Monat", "Quartal", "Jahr"], index=0)
-gran_col = {"Monat": "Monat", "Quartal": "Quartal", "Jahr": "Jahr"}[granularity]
+gran_col = {"Monat": "month", "Quartal": "quarter", "Jahr": "year"}[granularity]
 
-# Apply filters
+st.sidebar.markdown("---")
+st.sidebar.caption(f"📊 {len(df_raw):,} Einträge geladen")
+
+# ── Gefilterter DataFrame ──
 df = df_raw[
-    df_raw['Jahr'].isin(sel_years) &
-    df_raw['Benutzer'].isin(sel_users) &
-    df_raw['Kunde'].isin(sel_clients)
+    df_raw["year"].isin(sel_years) &
+    df_raw["user"].isin(sel_users) &
+    df_raw["client"].isin(sel_clients)
 ].copy()
+
+if df.empty:
+    st.warning("Keine Daten für die gewählten Filter. Bitte Filter anpassen.")
+    st.stop()
 
 # ─────────────────────────────────────────────
 # HEADER
 # ─────────────────────────────────────────────
-st.title("⏱️ REVOIC · Clockify Insights")
-st.caption(f"Zeitraum: Jan 2022 – Feb 2026  ·  {len(df):,} Einträge nach Filter  ·  {df['Benutzer'].nunique()} Personen  ·  {df['Kunde'].nunique()} Kunden")
+st.markdown("# ⏱️ Clockify Insights")
+st.markdown(
+    f"**{len(df):,} Einträge** · "
+    f"{df['user'].nunique()} Personen · "
+    f"{df['client'].nunique()} Kunden · "
+    f"{df['project'].nunique()} Projekte · "
+    f"{df['date'].min().strftime('%d.%m.%Y') if pd.notna(df['date'].min()) else '?'} – "
+    f"{df['date'].max().strftime('%d.%m.%Y') if pd.notna(df['date'].max()) else '?'}"
+)
 st.markdown("---")
 
 # ─────────────────────────────────────────────
 # TABS
 # ─────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+tabs = st.tabs([
     "📊 Überblick",
     "📈 Entwicklung",
     "👥 Team",
@@ -127,431 +216,490 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "🎉 Fun Facts",
 ])
 
+PALETTE = px.colors.qualitative.Bold
+
 # ══════════════════════════════════════════════
 # TAB 1 – ÜBERBLICK
 # ══════════════════════════════════════════════
-with tab1:
-    st.markdown('<div class="section-header">Key Metrics</div>', unsafe_allow_html=True)
-
-    total_h      = df['Dauer (dezimal)'].sum()
-    avg_h_entry  = df['Dauer (dezimal)'].mean()
-    bill_pct     = df['Abrechenbar_bool'].mean() * 100
-    intern_pct   = df['Intern'].mean() * 100
-    num_kunden   = df[~df['Intern']]['Kunde'].nunique()
+with tabs[0]:
+    total_h   = df["duration_h"].sum()
+    avg_entry = df["duration_h"].mean()
+    pct_bill  = df["is_billable"].mean() * 100
+    pct_int   = df["is_internal"].mean() * 100
+    n_clients = df["client"].nunique()
 
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Gesamtstunden", f"{total_h:,.0f} h")
-    c2.metric("Ø pro Eintrag", f"{avg_h_entry:.2f} h")
-    c3.metric("Abrechenbar", f"{bill_pct:.1f} %")
-    c4.metric("Intern (REVOIC)", f"{intern_pct:.1f} %")
-    c5.metric("Aktive Kunden", num_kunden)
+    for col, label, value, sub in zip(
+        [c1, c2, c3, c4, c5],
+        ["⏱️ Gesamt-Stunden", "⌀ pro Buchung (min)", "✅ Abrechenbar", "🏠 Intern", "🏢 Kunden"],
+        [f"{total_h:,.0f} h", f"{avg_entry*60:.0f} min", f"{pct_bill:.1f} %", f"{pct_int:.1f} %", str(n_clients)],
+        ["Alle gefilterten Einträge", "Durchschnittliche Buchungslänge", "Anteil abrechenbarer Zeit",
+         "Anteil interner Buchungen", "Einzigartige Kunden"],
+    ):
+        col.markdown(
+            f'<div class="metric-card"><h3>{label}</h3><h1>{value}</h1><p>{sub}</p></div>',
+            unsafe_allow_html=True,
+        )
 
-    st.markdown('<div class="section-header">Stunden pro Jahr</div>', unsafe_allow_html=True)
-    yr_df = df.groupby('Jahr')['Dauer (dezimal)'].sum().reset_index()
-    yr_df.columns = ['Jahr', 'Stunden']
-    fig = px.bar(yr_df, x='Jahr', y='Stunden', text_auto='.0f',
-                 color='Stunden', color_continuous_scale='Blues',
-                 labels={'Stunden': 'Stunden (h)'})
-    fig.update_layout(coloraxis_showscale=False, xaxis=dict(type='category'))
-    st.plotly_chart(fig, use_container_width=True)
+    st.markdown("---")
+    col_l, col_r = st.columns(2)
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown('<div class="section-header">Top 10 Projekte (Stunden)</div>', unsafe_allow_html=True)
-        top_proj = (df.groupby('Projekt')['Dauer (dezimal)'].sum()
-                    .sort_values(ascending=False).head(10).reset_index())
-        fig2 = px.bar(top_proj, x='Dauer (dezimal)', y='Projekt',
-                      orientation='h', text_auto='.0f',
-                      color='Dauer (dezimal)', color_continuous_scale='Blues')
-        fig2.update_layout(coloraxis_showscale=False, yaxis=dict(autorange='reversed'))
-        st.plotly_chart(fig2, use_container_width=True)
-    with col2:
-        st.markdown('<div class="section-header">Top 10 Kunden (Stunden)</div>', unsafe_allow_html=True)
-        top_kd = (df.groupby('Kunde')['Dauer (dezimal)'].sum()
-                  .sort_values(ascending=False).head(10).reset_index())
-        fig3 = px.bar(top_kd, x='Dauer (dezimal)', y='Kunde',
-                      orientation='h', text_auto='.0f',
-                      color='Dauer (dezimal)', color_continuous_scale='Teal')
-        fig3.update_layout(coloraxis_showscale=False, yaxis=dict(autorange='reversed'))
-        st.plotly_chart(fig3, use_container_width=True)
+    with col_l:
+        st.subheader("Stunden pro Jahr")
+        by_year = df.groupby("year")["duration_h"].sum().reset_index()
+        fig = px.bar(by_year, x="year", y="duration_h", color="year",
+                     color_discrete_sequence=PALETTE,
+                     labels={"duration_h": "Stunden", "year": "Jahr"},
+                     text_auto=".0f")
+        fig.update_layout(showlegend=False, plot_bgcolor="rgba(0,0,0,0)")
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col_r:
+        st.subheader("Top 10 Kunden")
+        top_clients = (
+            df.groupby("client")["duration_h"].sum()
+            .sort_values(ascending=True).tail(10).reset_index()
+        )
+        fig = px.bar(top_clients, x="duration_h", y="client", orientation="h",
+                     color="duration_h", color_continuous_scale="Blues",
+                     labels={"duration_h": "Stunden", "client": "Kunde"},
+                     text_auto=".0f")
+        fig.update_layout(coloraxis_showscale=False, plot_bgcolor="rgba(0,0,0,0)")
+        st.plotly_chart(fig, use_container_width=True)
+
+    col_l2, col_r2 = st.columns(2)
+    with col_l2:
+        st.subheader("Top 10 Projekte")
+        top_proj = (
+            df.groupby("project")["duration_h"].sum()
+            .sort_values(ascending=True).tail(10).reset_index()
+        )
+        fig = px.bar(top_proj, x="duration_h", y="project", orientation="h",
+                     color="duration_h", color_continuous_scale="Teal",
+                     labels={"duration_h": "Stunden", "project": "Projekt"},
+                     text_auto=".0f")
+        fig.update_layout(coloraxis_showscale=False, plot_bgcolor="rgba(0,0,0,0)")
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col_r2:
+        st.subheader("Abrechenbar vs. Nicht-Abrechenbar")
+        bill_data = df.groupby("is_billable")["duration_h"].sum().reset_index()
+        bill_data["label"] = bill_data["is_billable"].map({True: "Abrechenbar", False: "Nicht-Abrechenbar"})
+        fig = px.pie(bill_data, values="duration_h", names="label",
+                     color_discrete_sequence=["#2d6a9f", "#e8b04b"],
+                     hole=0.45)
+        fig.update_traces(textposition="inside", textinfo="percent+label")
+        st.plotly_chart(fig, use_container_width=True)
 
 # ══════════════════════════════════════════════
 # TAB 2 – ENTWICKLUNG
 # ══════════════════════════════════════════════
-with tab2:
-    st.markdown('<div class="section-header">Stunden-Verlauf über Zeit</div>', unsafe_allow_html=True)
+with tabs[1]:
+    st.subheader(f"Stundenentwicklung ({granularity})")
 
-    time_df = df.groupby(gran_col)['Dauer (dezimal)'].sum().reset_index()
-    time_df.columns = ['Periode', 'Stunden']
-    fig = px.area(time_df, x='Periode', y='Stunden',
-                  labels={'Stunden': 'Stunden (h)', 'Periode': granularity},
-                  color_discrete_sequence=['#2d6a9f'])
-    fig.update_xaxes(tickangle=45)
+    ts = df.groupby(gran_col)["duration_h"].sum().reset_index().sort_values(gran_col)
+    fig = px.line(ts, x=gran_col, y="duration_h", markers=True,
+                  labels={"duration_h": "Stunden", gran_col: granularity},
+                  color_discrete_sequence=["#2d6a9f"])
+    fig.update_traces(line_width=2.5, marker_size=7)
+    fig.update_layout(plot_bgcolor="rgba(0,0,0,0)")
     st.plotly_chart(fig, use_container_width=True)
 
-    st.markdown('<div class="section-header">Abrechenbar vs. Nicht-abrechenbar im Zeitverlauf</div>', unsafe_allow_html=True)
-    bill_time = (df.groupby([gran_col, 'Abrechenbar'])['Dauer (dezimal)']
-                 .sum().reset_index())
-    bill_time.columns = ['Periode', 'Abrechenbar', 'Stunden']
-    fig2 = px.bar(bill_time, x='Periode', y='Stunden', color='Abrechenbar',
-                  barmode='stack',
-                  color_discrete_map={'Ja': '#2d6a9f', 'Nein': '#f0a500'},
-                  labels={'Stunden': 'Stunden (h)', 'Periode': granularity})
-    fig2.update_xaxes(tickangle=45)
-    st.plotly_chart(fig2, use_container_width=True)
+    st.markdown("---")
+    col_l, col_r = st.columns(2)
 
-    st.markdown('<div class="section-header">% Abrechenbar pro Periode</div>', unsafe_allow_html=True)
-    pct_df = (df.groupby(gran_col)['Abrechenbar_bool']
-              .agg(['sum', 'count']).reset_index())
-    pct_df.columns = ['Periode', 'Abrechenbar', 'Gesamt']
-    pct_df['Pct'] = pct_df['Abrechenbar'] / pct_df['Gesamt'] * 100
-    fig3 = px.line(pct_df, x='Periode', y='Pct',
-                   labels={'Pct': '% Abrechenbar', 'Periode': granularity},
-                   color_discrete_sequence=['#2d6a9f'], markers=True)
-    fig3.add_hline(y=pct_df['Pct'].mean(), line_dash='dash', line_color='gray',
-                   annotation_text=f"Ø {pct_df['Pct'].mean():.1f}%")
-    fig3.update_xaxes(tickangle=45)
-    st.plotly_chart(fig3, use_container_width=True)
+    with col_l:
+        st.subheader("Abrechenbar vs. Nicht-Abrechenbar im Verlauf")
+        ts_bill = (
+            df.groupby([gran_col, "is_billable"])["duration_h"].sum()
+            .reset_index().sort_values(gran_col)
+        )
+        ts_bill["Typ"] = ts_bill["is_billable"].map({True: "Abrechenbar", False: "Nicht-Abrechenbar"})
+        fig = px.area(ts_bill, x=gran_col, y="duration_h", color="Typ",
+                      color_discrete_sequence=["#2d6a9f", "#e8b04b"],
+                      labels={"duration_h": "Stunden", gran_col: granularity})
+        fig.update_layout(plot_bgcolor="rgba(0,0,0,0)")
+        st.plotly_chart(fig, use_container_width=True)
 
-    st.markdown('<div class="section-header">Neue Kunden pro Jahr (Erstes Tracking)</div>', unsafe_allow_html=True)
-    first_seen = (df[~df['Intern']].groupby('Kunde')['Startdatum']
-                  .min().dt.year.value_counts().sort_index().reset_index())
-    first_seen.columns = ['Jahr', 'Neue Kunden']
-    fig4 = px.bar(first_seen, x='Jahr', y='Neue Kunden', text_auto=True,
-                  color='Neue Kunden', color_continuous_scale='Blues')
-    fig4.update_layout(coloraxis_showscale=False, xaxis=dict(type='category'))
-    st.plotly_chart(fig4, use_container_width=True)
+    with col_r:
+        st.subheader("% Abrechenbar – Effizienztrend")
+        ts_pct = (
+            df.groupby(gran_col)
+            .apply(lambda x: x["is_billable"].mean() * 100)
+            .reset_index(name="pct_billable")
+            .sort_values(gran_col)
+        )
+        fig = px.line(ts_pct, x=gran_col, y="pct_billable", markers=True,
+                      color_discrete_sequence=["#27ae60"],
+                      labels={"pct_billable": "% Abrechenbar", gran_col: granularity})
+        fig.add_hline(y=ts_pct["pct_billable"].mean(), line_dash="dash",
+                      line_color="gray", annotation_text="Ø Gesamt")
+        fig.update_layout(plot_bgcolor="rgba(0,0,0,0)")
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("---")
+    st.subheader("Neue Kunden pro Jahr")
+    first_year = (
+        df.groupby("client")["year"].min().reset_index()
+        .rename(columns={"year": "first_year"})
+    )
+    new_per_year = first_year.groupby("first_year").size().reset_index(name="neue_kunden")
+    fig = px.bar(new_per_year, x="first_year", y="neue_kunden",
+                 color_discrete_sequence=["#8e44ad"], text_auto=True,
+                 labels={"first_year": "Jahr", "neue_kunden": "Neue Kunden"})
+    fig.update_layout(plot_bgcolor="rgba(0,0,0,0)")
+    st.plotly_chart(fig, use_container_width=True)
 
 # ══════════════════════════════════════════════
 # TAB 3 – TEAM
 # ══════════════════════════════════════════════
-with tab3:
-    st.markdown('<div class="section-header">Stunden pro Mitarbeiter:in (gesamt)</div>', unsafe_allow_html=True)
+with tabs[2]:
+    col_l, col_r = st.columns(2)
 
-    user_df = (df.groupby('Benutzer')['Dauer (dezimal)'].sum()
-               .sort_values(ascending=False).reset_index())
-    user_df.columns = ['Person', 'Stunden']
-    fig = px.bar(user_df, x='Person', y='Stunden', text_auto='.0f',
-                 color='Stunden', color_continuous_scale='Blues')
-    fig.update_layout(coloraxis_showscale=False, xaxis_tickangle=45)
+    with col_l:
+        st.subheader("Stunden pro Person")
+        by_user = (
+            df.groupby("user")["duration_h"].sum()
+            .sort_values(ascending=True).reset_index()
+        )
+        fig = px.bar(by_user, x="duration_h", y="user", orientation="h",
+                     color="duration_h", color_continuous_scale="Blues",
+                     labels={"duration_h": "Stunden", "user": "Person"},
+                     text_auto=".0f")
+        fig.update_layout(coloraxis_showscale=False, plot_bgcolor="rgba(0,0,0,0)",
+                          height=max(400, len(by_user) * 28))
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col_r:
+        st.subheader("% Abrechenbar pro Person")
+        bill_user = (
+            df.groupby("user")
+            .apply(lambda x: x["is_billable"].mean() * 100)
+            .reset_index(name="pct")
+            .sort_values("pct", ascending=True)
+        )
+        bill_user["color"] = bill_user["pct"].apply(
+            lambda v: "#27ae60" if v >= 60 else ("#e8b04b" if v >= 30 else "#e74c3c")
+        )
+        fig = px.bar(bill_user, x="pct", y="user", orientation="h",
+                     color="color", color_discrete_map="identity",
+                     labels={"pct": "% Abrechenbar", "user": "Person"},
+                     text_auto=".1f")
+        fig.add_vline(x=60, line_dash="dash", line_color="gray",
+                      annotation_text="60 % Ziel")
+        fig.update_layout(showlegend=False, plot_bgcolor="rgba(0,0,0,0)",
+                          height=max(400, len(bill_user) * 28))
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("---")
+    st.subheader(f"Top-10-Personen im Zeitverlauf ({granularity})")
+    top10_users = (
+        df.groupby("user")["duration_h"].sum()
+        .sort_values(ascending=False).head(10).index.tolist()
+    )
+    ts_user = (
+        df[df["user"].isin(top10_users)]
+        .groupby([gran_col, "user"])["duration_h"].sum()
+        .reset_index().sort_values(gran_col)
+    )
+    fig = px.line(ts_user, x=gran_col, y="duration_h", color="user",
+                  color_discrete_sequence=PALETTE, markers=False,
+                  labels={"duration_h": "Stunden", gran_col: granularity, "user": "Person"})
+    fig.update_layout(plot_bgcolor="rgba(0,0,0,0)")
     st.plotly_chart(fig, use_container_width=True)
 
-    st.markdown('<div class="section-header">Stunden pro Person im Zeitverlauf (Top 10)</div>', unsafe_allow_html=True)
-    top10_users = user_df.head(10)['Person'].tolist()
-    user_time = (df[df['Benutzer'].isin(top10_users)]
-                 .groupby([gran_col, 'Benutzer'])['Dauer (dezimal)']
-                 .sum().reset_index())
-    user_time.columns = ['Periode', 'Person', 'Stunden']
-    fig2 = px.line(user_time, x='Periode', y='Stunden', color='Person',
-                   markers=True,
-                   labels={'Stunden': 'Stunden (h)', 'Periode': granularity})
-    fig2.update_xaxes(tickangle=45)
-    st.plotly_chart(fig2, use_container_width=True)
-
-    st.markdown('<div class="section-header">% Abrechenbar pro Person</div>', unsafe_allow_html=True)
-    user_bill = (df.groupby('Benutzer')
-                 .agg(Abrechenbar=('Abrechenbar_bool', 'sum'), Gesamt=('Abrechenbar_bool', 'count'))
-                 .reset_index())
-    user_bill['Pct_Abrechenbar'] = user_bill['Abrechenbar'] / user_bill['Gesamt'] * 100
-    user_bill = user_bill.sort_values('Pct_Abrechenbar', ascending=False)
-    fig3 = px.bar(user_bill, x='Benutzer', y='Pct_Abrechenbar',
-                  text_auto='.1f',
-                  color='Pct_Abrechenbar', color_continuous_scale='RdYlGn',
-                  labels={'Pct_Abrechenbar': '% Abrechenbar'})
-    fig3.update_layout(coloraxis_showscale=False, xaxis_tickangle=45)
-    st.plotly_chart(fig3, use_container_width=True)
-
-    st.markdown('<div class="section-header">Heatmap: Tracking nach Wochentag & Person (Top 8)</div>', unsafe_allow_html=True)
-    top8 = user_df.head(8)['Person'].tolist()
-    wd_order = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
-    wd_labels = ['Mo','Di','Mi','Do','Fr','Sa','So']
-    heat_df = (df[df['Benutzer'].isin(top8)]
-               .groupby(['Benutzer', 'Wochentag'])['Dauer (dezimal)'].sum()
-               .reset_index())
-    heat_pivot = heat_df.pivot(index='Benutzer', columns='Wochentag', values='Dauer (dezimal)').fillna(0)
-    existing_cols = [c for c in wd_order if c in heat_pivot.columns]
-    heat_pivot = heat_pivot[existing_cols]
-    fig4 = px.imshow(heat_pivot, color_continuous_scale='Blues',
-                     labels={'color': 'Stunden'},
-                     aspect='auto')
-    st.plotly_chart(fig4, use_container_width=True)
+    st.markdown("---")
+    st.subheader("Heatmap: Buchungen nach Wochentag & Person")
+    weekday_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    heatmap_data = (
+        df.groupby(["user", "weekday"])["duration_h"].sum()
+        .reset_index()
+        .pivot(index="user", columns="weekday", values="duration_h")
+        .reindex(columns=[d for d in weekday_order if d in df["weekday"].unique()])
+        .fillna(0)
+    )
+    fig = px.imshow(heatmap_data, color_continuous_scale="Blues",
+                    labels={"color": "Stunden"},
+                    aspect="auto")
+    fig.update_layout(height=max(400, len(heatmap_data) * 30))
+    st.plotly_chart(fig, use_container_width=True)
 
 # ══════════════════════════════════════════════
 # TAB 4 – KUNDEN
 # ══════════════════════════════════════════════
-with tab4:
-    ext_df = df[~df['Intern']].copy()
+with tabs[3]:
+    col_l, col_r = st.columns(2)
 
-    st.markdown('<div class="section-header">Kunden-Entwicklung über Zeit (Top 8)</div>', unsafe_allow_html=True)
-    top8_kd = (ext_df.groupby('Kunde')['Dauer (dezimal)'].sum()
-               .sort_values(ascending=False).head(8).index.tolist())
-    kd_time = (ext_df[ext_df['Kunde'].isin(top8_kd)]
-               .groupby([gran_col, 'Kunde'])['Dauer (dezimal)']
-               .sum().reset_index())
-    kd_time.columns = ['Periode', 'Kunde', 'Stunden']
-    fig = px.line(kd_time, x='Periode', y='Stunden', color='Kunde',
-                  markers=True,
-                  labels={'Stunden': 'Stunden (h)', 'Periode': granularity})
-    fig.update_xaxes(tickangle=45)
-    st.plotly_chart(fig, use_container_width=True)
+    with col_l:
+        st.subheader("Top-12-Kunden im Zeitverlauf")
+        top12_clients = (
+            df.groupby("client")["duration_h"].sum()
+            .sort_values(ascending=False).head(12).index.tolist()
+        )
+        ts_cl = (
+            df[df["client"].isin(top12_clients)]
+            .groupby([gran_col, "client"])["duration_h"].sum()
+            .reset_index().sort_values(gran_col)
+        )
+        fig = px.line(ts_cl, x=gran_col, y="duration_h", color="client",
+                      color_discrete_sequence=PALETTE, markers=False,
+                      labels={"duration_h": "Stunden", gran_col: granularity, "client": "Kunde"})
+        fig.update_layout(plot_bgcolor="rgba(0,0,0,0)")
+        st.plotly_chart(fig, use_container_width=True)
 
-    st.markdown('<div class="section-header">Langzeit-Kunden: Wie lange dabei?</div>', unsafe_allow_html=True)
-    kd_span = (ext_df.groupby('Kunde')['Startdatum']
-               .agg(['min', 'max']).reset_index())
-    kd_span.columns = ['Kunde', 'Erste Buchung', 'Letzte Buchung']
-    kd_span['Tage aktiv'] = (kd_span['Letzte Buchung'] - kd_span['Erste Buchung']).dt.days
-    kd_span['Monate aktiv'] = (kd_span['Tage aktiv'] / 30).round(1)
-    kd_stunden = ext_df.groupby('Kunde')['Dauer (dezimal)'].sum().reset_index()
-    kd_stunden.columns = ['Kunde', 'Stunden gesamt']
-    kd_span = kd_span.merge(kd_stunden, on='Kunde').sort_values('Monate aktiv', ascending=False)
+    with col_r:
+        st.subheader("Kundenlaufzeit vs. Gesamtstunden")
+        client_stats = df.groupby("client").agg(
+            total_h=("duration_h", "sum"),
+            first_date=("date", "min"),
+            last_date=("date", "max"),
+        ).reset_index()
+        client_stats["laufzeit_tage"] = (
+            client_stats["last_date"] - client_stats["first_date"]
+        ).dt.days
+        fig = px.scatter(
+            client_stats, x="laufzeit_tage", y="total_h", text="client",
+            color="total_h", color_continuous_scale="Blues", size="total_h",
+            labels={"laufzeit_tage": "Laufzeit (Tage)", "total_h": "Gesamtstunden"},
+            size_max=40,
+        )
+        fig.update_traces(textposition="top center")
+        fig.update_layout(coloraxis_showscale=False, plot_bgcolor="rgba(0,0,0,0)")
+        st.plotly_chart(fig, use_container_width=True)
 
-    fig2 = px.scatter(kd_span, x='Monate aktiv', y='Stunden gesamt',
-                      size='Stunden gesamt', color='Stunden gesamt',
-                      hover_name='Kunde', color_continuous_scale='Blues',
-                      labels={'Monate aktiv': 'Monate aktiv', 'Stunden gesamt': 'Stunden'},
-                      size_max=60)
-    fig2.update_layout(coloraxis_showscale=False)
-    st.plotly_chart(fig2, use_container_width=True)
+    st.markdown("---")
+    st.subheader("Alle Kunden – Übersicht")
+    client_table = df.groupby("client").agg(
+        Stunden=("duration_h", "sum"),
+        Buchungen=("duration_h", "count"),
+        Projekte=("project", "nunique"),
+        Personen=("user", "nunique"),
+        Erster_Eintrag=("date", "min"),
+        Letzter_Eintrag=("date", "max"),
+    ).reset_index().sort_values("Stunden", ascending=False)
+    client_table["Stunden"] = client_table["Stunden"].round(1)
+    client_table["Erster_Eintrag"] = client_table["Erster_Eintrag"].dt.strftime("%d.%m.%Y")
+    client_table["Letzter_Eintrag"] = client_table["Letzter_Eintrag"].dt.strftime("%d.%m.%Y")
+    st.dataframe(client_table, use_container_width=True, hide_index=True)
 
-    st.markdown('<div class="section-header">Kunden-Tabelle (sortierbar)</div>', unsafe_allow_html=True)
-    st.dataframe(
-        kd_span[['Kunde', 'Erste Buchung', 'Letzte Buchung', 'Monate aktiv', 'Stunden gesamt']]
-        .assign(**{'Erste Buchung': lambda x: x['Erste Buchung'].dt.date,
-                   'Letzte Buchung': lambda x: x['Letzte Buchung'].dt.date})
-        .style.background_gradient(subset=['Stunden gesamt', 'Monate aktiv'], cmap='Blues'),
-        use_container_width=True, height=400
-    )
+    st.markdown("---")
+    st.subheader("🔎 Einzelkunden-Analyse")
+    sel_client = st.selectbox("Kunde wählen", sorted(df["client"].unique()))
+    dfc = df[df["client"] == sel_client]
 
-    st.markdown('<div class="section-header">Einzelnen Kunden analysieren</div>', unsafe_allow_html=True)
-    sel_kd = st.selectbox("Kunde auswählen", sorted(ext_df['Kunde'].unique().tolist()))
-    kd_detail = ext_df[ext_df['Kunde'] == sel_kd]
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Gesamt-Stunden", f"{kd_detail['Dauer (dezimal)'].sum():.1f} h")
-    c2.metric("Einträge", f"{len(kd_detail):,}")
-    c3.metric("Aktive Monate", f"{kd_detail['Monat'].nunique()}")
-
-    kd_proj = (kd_detail.groupby('Projekt')['Dauer (dezimal)'].sum()
-               .sort_values(ascending=False).reset_index())
-    fig3 = px.pie(kd_proj, names='Projekt', values='Dauer (dezimal)',
-                  title=f'Projektverteilung – {sel_kd}',
-                  color_discrete_sequence=px.colors.sequential.Blues_r)
-    st.plotly_chart(fig3, use_container_width=True)
-
-    kd_trend = (kd_detail.groupby('Monat')['Dauer (dezimal)'].sum().reset_index())
-    kd_trend.columns = ['Monat', 'Stunden']
-    fig4 = px.bar(kd_trend, x='Monat', y='Stunden',
-                  title=f'Monatliche Stunden – {sel_kd}',
-                  color='Stunden', color_continuous_scale='Blues')
-    fig4.update_layout(coloraxis_showscale=False, xaxis_tickangle=45)
-    st.plotly_chart(fig4, use_container_width=True)
+    cc1, cc2 = st.columns(2)
+    with cc1:
+        st.markdown(f"**Projektmix für {sel_client}**")
+        proj_mix = dfc.groupby("project")["duration_h"].sum().reset_index()
+        fig = px.pie(proj_mix, values="duration_h", names="project",
+                     color_discrete_sequence=PALETTE, hole=0.4)
+        st.plotly_chart(fig, use_container_width=True)
+    with cc2:
+        st.markdown(f"**Monatsverlauf für {sel_client}**")
+        ts_c = dfc.groupby("month")["duration_h"].sum().reset_index().sort_values("month")
+        fig = px.bar(ts_c, x="month", y="duration_h",
+                     color_discrete_sequence=["#2d6a9f"],
+                     labels={"duration_h": "Stunden", "month": "Monat"})
+        fig.update_layout(plot_bgcolor="rgba(0,0,0,0)")
+        st.plotly_chart(fig, use_container_width=True)
 
 # ══════════════════════════════════════════════
 # TAB 5 – PROJEKTE
 # ══════════════════════════════════════════════
-with tab5:
-    st.markdown('<div class="section-header">Projektmix über Zeit (%)</div>', unsafe_allow_html=True)
+with tabs[4]:
+    st.subheader(f"Projektmix-Anteil im Zeitverlauf ({granularity})")
+    top15_proj = (
+        df.groupby("project")["duration_h"].sum()
+        .sort_values(ascending=False).head(15).index.tolist()
+    )
+    ts_proj = (
+        df[df["project"].isin(top15_proj)]
+        .groupby([gran_col, "project"])["duration_h"].sum()
+        .reset_index().sort_values(gran_col)
+    )
+    # Anteil berechnen
+    totals = ts_proj.groupby(gran_col)["duration_h"].sum().rename("total")
+    ts_proj = ts_proj.join(totals, on=gran_col)
+    ts_proj["anteil"] = ts_proj["duration_h"] / ts_proj["total"] * 100
 
-    # Top 10 Projekte, Rest = "Sonstiges"
-    top10_proj = (df.groupby('Projekt')['Dauer (dezimal)'].sum()
-                  .sort_values(ascending=False).head(10).index.tolist())
-    df_proj_tmp = df.copy()
-    df_proj_tmp['Projekt_grp'] = df_proj_tmp['Projekt'].apply(
-        lambda x: x if x in top10_proj else 'Sonstiges')
-    proj_time = (df_proj_tmp.groupby([gran_col, 'Projekt_grp'])['Dauer (dezimal)']
-                 .sum().reset_index())
-    proj_time.columns = ['Periode', 'Projekt', 'Stunden']
-    proj_total = proj_time.groupby('Periode')['Stunden'].transform('sum')
-    proj_time['Anteil (%)'] = proj_time['Stunden'] / proj_total * 100
-    fig = px.bar(proj_time, x='Periode', y='Anteil (%)', color='Projekt',
-                 barmode='stack',
-                 labels={'Anteil (%)': 'Anteil in %', 'Periode': granularity})
-    fig.update_xaxes(tickangle=45)
+    fig = px.area(ts_proj, x=gran_col, y="anteil", color="project",
+                  color_discrete_sequence=PALETTE,
+                  labels={"anteil": "Anteil (%)", gran_col: granularity, "project": "Projekt"},
+                  groupnorm="")
+    fig.update_layout(plot_bgcolor="rgba(0,0,0,0)", height=500)
     st.plotly_chart(fig, use_container_width=True)
 
-    st.markdown('<div class="section-header">ALT-Projekte: Aufräum-Trend</div>', unsafe_allow_html=True)
-    df['ist_alt'] = df['Projekt'].str.startswith('(Alt)') | df['Projekt'].str.contains('ALT', case=False, na=False)
-    alt_time = (df.groupby([gran_col, 'ist_alt'])['Dauer (dezimal)']
-                .sum().reset_index())
-    alt_time.columns = ['Periode', 'ALT-Projekt', 'Stunden']
-    alt_time['Label'] = alt_time['ALT-Projekt'].map({True: 'ALT / veraltet', False: 'Aktuell'})
-    fig2 = px.bar(alt_time, x='Periode', y='Stunden', color='Label',
-                  barmode='stack',
-                  color_discrete_map={'ALT / veraltet': '#e57373', 'Aktuell': '#2d6a9f'},
-                  labels={'Stunden': 'Stunden (h)', 'Periode': granularity})
-    fig2.update_xaxes(tickangle=45)
-    st.plotly_chart(fig2, use_container_width=True)
-
-    st.markdown('<div class="section-header">Vollständige Projektübersicht</div>', unsafe_allow_html=True)
-    proj_sum = (df.groupby('Projekt')
-                .agg(Stunden=('Dauer (dezimal)', 'sum'),
-                     Einträge=('Dauer (dezimal)', 'count'),
-                     Ø_Dauer=('Dauer (dezimal)', 'mean'),
-                     Abrechenbar=('Abrechenbar_bool', 'mean'))
-                .reset_index()
-                .sort_values('Stunden', ascending=False))
-    proj_sum['Abrechenbar'] = (proj_sum['Abrechenbar'] * 100).round(1).astype(str) + ' %'
-    proj_sum['Ø_Dauer'] = proj_sum['Ø_Dauer'].round(2)
-    st.dataframe(proj_sum, use_container_width=True, height=500)
+    st.markdown("---")
+    st.subheader("Alle Projekte – Übersicht")
+    proj_table = df.groupby(["project", "client"]).agg(
+        Stunden=("duration_h", "sum"),
+        Buchungen=("duration_h", "count"),
+        Personen=("user", "nunique"),
+        Erster_Eintrag=("date", "min"),
+        Letzter_Eintrag=("date", "max"),
+    ).reset_index().sort_values("Stunden", ascending=False)
+    proj_table["Stunden"] = proj_table["Stunden"].round(1)
+    proj_table["Erster_Eintrag"] = proj_table["Erster_Eintrag"].dt.strftime("%d.%m.%Y")
+    proj_table["Letzter_Eintrag"] = proj_table["Letzter_Eintrag"].dt.strftime("%d.%m.%Y")
+    st.dataframe(proj_table, use_container_width=True, hide_index=True)
 
 # ══════════════════════════════════════════════
-# TAB 6 – INTERN vs. EXTERN
+# TAB 6 – INTERN VS. EXTERN
 # ══════════════════════════════════════════════
-with tab6:
-    st.markdown('<div class="section-header">Intern vs. Extern im Zeitverlauf</div>', unsafe_allow_html=True)
-
-    ie_df = df.copy()
-    ie_df['Typ_IE'] = ie_df['Intern'].map({True: '🏠 Intern (REVOIC)', False: '🏢 Extern (Kunden)'})
-    ie_time = (ie_df.groupby([gran_col, 'Typ_IE'])['Dauer (dezimal)']
-               .sum().reset_index())
-    ie_time.columns = ['Periode', 'Typ', 'Stunden']
-    fig = px.bar(ie_time, x='Periode', y='Stunden', color='Typ',
-                 barmode='stack',
-                 color_discrete_map={'🏠 Intern (REVOIC)': '#f0a500', '🏢 Extern (Kunden)': '#2d6a9f'},
-                 labels={'Stunden': 'Stunden (h)', 'Periode': granularity})
-    fig.update_xaxes(tickangle=45)
+with tabs[5]:
+    st.subheader(f"Intern vs. Kunden-Zeit ({granularity})")
+    df["typ"] = df["is_internal"].map({True: "Intern", False: "Kunden"})
+    ts_int = (
+        df.groupby([gran_col, "typ"])["duration_h"].sum()
+        .reset_index().sort_values(gran_col)
+    )
+    fig = px.area(ts_int, x=gran_col, y="duration_h", color="typ",
+                  color_discrete_sequence=["#e8b04b", "#2d6a9f"],
+                  labels={"duration_h": "Stunden", gran_col: granularity, "typ": "Typ"})
+    fig.update_layout(plot_bgcolor="rgba(0,0,0,0)")
     st.plotly_chart(fig, use_container_width=True)
 
-    st.markdown('<div class="section-header">% Interne Zeit pro Periode</div>', unsafe_allow_html=True)
-    ie_pct = (ie_df.groupby(gran_col)['Intern']
-              .agg(['sum', 'count']).reset_index())
-    ie_pct.columns = ['Periode', 'Intern', 'Gesamt']
-    ie_pct['% Intern'] = ie_pct['Intern'] / ie_pct['Gesamt'] * 100
-    fig2 = px.line(ie_pct, x='Periode', y='% Intern',
-                   markers=True, color_discrete_sequence=['#f0a500'],
-                   labels={'% Intern': '% Interne Einträge', 'Periode': granularity})
-    fig2.add_hline(y=ie_pct['% Intern'].mean(), line_dash='dash', line_color='gray',
-                   annotation_text=f"Ø {ie_pct['% Intern'].mean():.1f}%")
-    fig2.update_xaxes(tickangle=45)
-    st.plotly_chart(fig2, use_container_width=True)
+    st.markdown("---")
+    col_l, col_r = st.columns(2)
 
-    st.markdown('<div class="section-header">Interne Projekte: Wie hat sich der Mix verändert?</div>', unsafe_allow_html=True)
-    int_df = df[df['Intern']].copy()
-    top8_int = (int_df.groupby('Projekt')['Dauer (dezimal)'].sum()
-                .sort_values(ascending=False).head(8).index.tolist())
-    int_df['Projekt_grp'] = int_df['Projekt'].apply(
-        lambda x: x if x in top8_int else 'Sonstiges')
-    int_time = (int_df.groupby([gran_col, 'Projekt_grp'])['Dauer (dezimal)']
-                .sum().reset_index())
-    int_time.columns = ['Periode', 'Projekt', 'Stunden']
-    int_total = int_time.groupby('Periode')['Stunden'].transform('sum')
-    int_time['Anteil (%)'] = int_time['Stunden'] / int_total * 100
-    fig3 = px.bar(int_time, x='Periode', y='Anteil (%)', color='Projekt',
-                  barmode='stack',
-                  labels={'Anteil (%)': 'Anteil in %', 'Periode': granularity})
-    fig3.update_xaxes(tickangle=45)
-    st.plotly_chart(fig3, use_container_width=True)
+    with col_l:
+        st.subheader("% Interne Zeit pro Periode")
+        pct_int_ts = (
+            df.groupby(gran_col)
+            .apply(lambda x: x["is_internal"].mean() * 100)
+            .reset_index(name="pct_intern")
+            .sort_values(gran_col)
+        )
+        fig = px.line(pct_int_ts, x=gran_col, y="pct_intern", markers=True,
+                      color_discrete_sequence=["#e8b04b"],
+                      labels={"pct_intern": "% Intern", gran_col: granularity})
+        fig.add_hline(y=pct_int_ts["pct_intern"].mean(), line_dash="dash",
+                      line_color="gray", annotation_text="Ø")
+        fig.update_layout(plot_bgcolor="rgba(0,0,0,0)")
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col_r:
+        st.subheader("Interner Projektmix")
+        int_proj = (
+            df[df["is_internal"]]
+            .groupby("project")["duration_h"].sum()
+            .sort_values(ascending=False).head(12).reset_index()
+        )
+        if int_proj.empty:
+            st.info("Keine internen Buchungen gefunden. Prüfe den Kundennamen (Stichwort: 'intern', 'internal' oder Firmenname).")
+        else:
+            fig = px.pie(int_proj, values="duration_h", names="project",
+                         color_discrete_sequence=PALETTE, hole=0.4)
+            st.plotly_chart(fig, use_container_width=True)
 
 # ══════════════════════════════════════════════
-# TAB 7 – FUN FACTS 🎉
+# TAB 7 – FUN FACTS
 # ══════════════════════════════════════════════
-with tab7:
-    st.markdown('<div class="section-header">🎉 Fun Facts & kuriose Einblicke</div>', unsafe_allow_html=True)
+with tabs[6]:
+    st.subheader("🎉 Fun Facts & Kuriositäten")
 
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
 
+    # Frühaufsteher
     with col1:
-        # Früheste Buchung des Tages
-        df_hr = df.copy()
-        df_hr['Stunde_num'] = pd.to_numeric(df['Startzeit'].str[:2], errors='coerce')
-        early = df_hr[df_hr['Stunde_num'] < 6].copy()
-        night = df_hr[df_hr['Stunde_num'] >= 22].copy()
+        st.markdown("### 🌅 Frühaufsteher")
+        if "hour" in df.columns and df["hour"].notna().any():
+            early = df[df["hour"] < 7]
+            if not early.empty:
+                top_early = early.groupby("user")["duration_h"].count().idxmax()
+                count_early = early.shape[0]
+                st.metric("Buchungen vor 7 Uhr", count_early)
+                st.metric("Fleißigste Frühaufsteherin", top_early)
+            else:
+                st.info("Keine Buchungen vor 7 Uhr.")
+        else:
+            st.info("Keine Zeitdaten verfügbar.")
 
-        st.markdown(f"""
-        <div class="fun-box">
-        🌅 <b>Frühaufsteher:</b> {len(early):,} Einträge vor 6 Uhr morgens!<br>
-        🦉 <b>Nachteulen:</b> {len(night):,} Einträge nach 22 Uhr!
-        </div>""", unsafe_allow_html=True)
-
-        # Kürzeste Buchung
-        shortest = df.nsmallest(1, 'Dauer (dezimal)')
-        st.markdown(f"""
-        <div class="fun-box">
-        ⚡ <b>Kürzeste Buchung:</b> {shortest['Dauer (dezimal)'].values[0]:.3f} h ({shortest['Dauer (dezimal)'].values[0]*60:.0f} Min)
-        – von <i>{shortest['Benutzer'].values[0]}</i> für <i>{shortest['Kunde'].values[0]}</i>
-        </div>""", unsafe_allow_html=True)
-
-        # Längste Buchung
-        longest = df.nlargest(1, 'Dauer (dezimal)')
-        st.markdown(f"""
-        <div class="fun-box">
-        🏋️ <b>Längste Einzelbuchung:</b> {longest['Dauer (dezimal)'].values[0]:.1f} h
-        – von <i>{longest['Benutzer'].values[0]}</i> am <i>{str(longest['Startdatum'].values[0])[:10]}</i>
-        <br>📝 "{longest['Beschreibung'].values[0]}"
-        </div>""", unsafe_allow_html=True)
-
+    # Nachteulen
     with col2:
-        # Produktivster Tag
-        best_day = (df.groupby('Startdatum')['Dauer (dezimal)'].sum()
-                    .idxmax())
-        best_day_h = df.groupby('Startdatum')['Dauer (dezimal)'].sum().max()
-        st.markdown(f"""
-        <div class="fun-box">
-        🏆 <b>Produktivster Tag:</b> {str(best_day)[:10]} mit {best_day_h:.1f} Stunden (Team gesamt)
-        </div>""", unsafe_allow_html=True)
+        st.markdown("### 🦉 Nachteulen")
+        if "hour" in df.columns and df["hour"].notna().any():
+            late = df[df["hour"] >= 21]
+            if not late.empty:
+                top_late = late.groupby("user")["duration_h"].count().idxmax()
+                count_late = late.shape[0]
+                st.metric("Buchungen ab 21 Uhr", count_late)
+                st.metric("Fleißigste Nachteule", top_late)
+            else:
+                st.info("Keine Buchungen ab 21 Uhr.")
+        else:
+            st.info("Keine Zeitdaten verfügbar.")
 
-        # Wochenend-Warriors
-        df['ist_wochenende'] = df['Wochentag'].isin(['Saturday', 'Sunday'])
-        we = df[df['ist_wochenende']]
-        we_top = we.groupby('Benutzer')['Dauer (dezimal)'].sum().sort_values(ascending=False).head(3)
-        we_str = ", ".join([f"{u} ({h:.0f}h)" for u, h in we_top.items()])
-        st.markdown(f"""
-        <div class="fun-box">
-        🛡️ <b>Wochenend-Warriors (Top 3):</b><br>{we_str}
-        </div>""", unsafe_allow_html=True)
+    # Wochenend-Warriors
+    with col3:
+        st.markdown("### 🏋️ Wochenend-Warriors")
+        weekend = df[df["weekday"].isin(["Saturday", "Sunday"])]
+        if not weekend.empty:
+            top_wknd = weekend.groupby("user")["duration_h"].sum().idxmax()
+            h_wknd = weekend["duration_h"].sum()
+            st.metric("Wochenend-Stunden gesamt", f"{h_wknd:.0f} h")
+            st.metric("Wochenend-Champion", top_wknd)
+        else:
+            st.info("Keine Wochenend-Buchungen.")
 
-        # Meiste Einträge an einem Tag
-        busy_person = (df.groupby(['Benutzer', 'Startdatum'])
-                       .size().idxmax())
-        busy_count  = df.groupby(['Benutzer', 'Startdatum']).size().max()
-        st.markdown(f"""
-        <div class="fun-box">
-        📋 <b>Meiste Buchungen an einem Tag:</b> {busy_count} Einträge
-        – von <i>{busy_person[0]}</i> am <i>{str(busy_person[1])[:10]}</i>
-        </div>""", unsafe_allow_html=True)
+    st.markdown("---")
+    col4, col5 = st.columns(2)
 
-    st.markdown('<div class="section-header">⏰ Wann wird am meisten gebucht? (Stunde des Tages)</div>', unsafe_allow_html=True)
-    df_hr2 = df.copy()
-    df_hr2['Stunde_num'] = pd.to_numeric(df['Startzeit'].str[:2], errors='coerce')
-    hour_df = df_hr2.groupby('Stunde_num')['Dauer (dezimal)'].sum().reset_index()
-    hour_df.columns = ['Stunde', 'Stunden']
-    fig = px.bar(hour_df, x='Stunde', y='Stunden',
-                 color='Stunden', color_continuous_scale='Blues',
-                 labels={'Stunde': 'Uhrzeit (Stunde)', 'Stunden': 'Stunden (h)'})
-    fig.update_layout(coloraxis_showscale=False)
-    st.plotly_chart(fig, use_container_width=True)
+    with col4:
+        st.markdown("### ⚡ Kürzeste & längste Buchung")
+        shortest = df.loc[df[df["duration_h"] > 0]["duration_h"].idxmin()]
+        longest  = df.loc[df["duration_h"].idxmax()]
+        st.info(
+            f"**Kürzeste:** {shortest['duration_h']*60:.1f} min  \n"
+            f"Person: {shortest['user']}  \n"
+            f"Projekt: {shortest['project']}"
+        )
+        st.success(
+            f"**Längste:** {longest['duration_h']:.1f} h  \n"
+            f"Person: {longest['user']}  \n"
+            f"Projekt: {longest['project']}"
+        )
 
-    st.markdown('<div class="section-header">📅 Wochentags-Muster: Wann arbeitet das Team?</div>', unsafe_allow_html=True)
-    wd_order = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
-    wd_labels_map = {'Monday':'Mo','Tuesday':'Di','Wednesday':'Mi',
-                     'Thursday':'Do','Friday':'Fr','Saturday':'Sa','Sunday':'So'}
-    wd_df = (df.groupby('Wochentag')['Dauer (dezimal)'].sum()
-             .reindex(wd_order).reset_index())
-    wd_df.columns = ['Tag', 'Stunden']
-    wd_df['Tag_DE'] = wd_df['Tag'].map(wd_labels_map)
-    fig2 = px.bar(wd_df, x='Tag_DE', y='Stunden',
-                  color='Stunden', color_continuous_scale='Blues',
-                  labels={'Tag_DE': 'Wochentag', 'Stunden': 'Stunden (h)'})
-    fig2.update_layout(coloraxis_showscale=False)
-    st.plotly_chart(fig2, use_container_width=True)
+        st.markdown("### 🏆 Produktivster Tag")
+        best_day = (
+            df.groupby(df["date"].dt.date)["duration_h"].sum().idxmax()
+        )
+        best_h = df.groupby(df["date"].dt.date)["duration_h"].sum().max()
+        st.success(f"**{best_day}** mit {best_h:.0f} Stunden im Team")
 
-    st.markdown('<div class="section-header">🔤 Häufigste Begriffe in Beschreibungen</div>', unsafe_allow_html=True)
-    from collections import Counter
-    import re
-    all_desc = ' '.join(df['Beschreibung'].dropna().str.lower().tolist())
-    words = re.findall(r'\b[a-zäöüß]{4,}\b', all_desc)
-    stopwords = {'und','mit','der','die','das','für','von','ist','eine','ein',
-                 'nicht','auch','sich','sind','wird','haben','nach','aber',
-                 'oder','beim','wurde','noch','dem','alle','this','that'}
+    with col5:
+        st.markdown("### 🕐 Buchungen nach Tageszeit")
+        if "hour" in df.columns and df["hour"].notna().any():
+            hour_dist = df.groupby("hour")["duration_h"].count().reset_index(name="buchungen")
+            fig = px.bar(hour_dist, x="hour", y="buchungen",
+                         color="buchungen", color_continuous_scale="Blues",
+                         labels={"hour": "Uhrzeit", "buchungen": "Anzahl Buchungen"})
+            fig.update_layout(coloraxis_showscale=False, plot_bgcolor="rgba(0,0,0,0)")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Keine Uhrzeitdaten verfügbar.")
+
+    st.markdown("---")
+    st.markdown("### 💬 Häufigste Wörter in Beschreibungen")
+    all_text = " ".join(df["description"].astype(str).tolist()).lower()
+    stopwords = {
+        "und", "der", "die", "das", "für", "mit", "an", "auf", "in", "zu",
+        "von", "bei", "ist", "im", "am", "ein", "eine", "einer", "einen",
+        "des", "dem", "den", "ich", "wir", "sie", "es", "er", "hat", "haben",
+        "the", "and", "for", "with", "of", "in", "to", "a", "an", "on", "is",
+        "nan", "", "-", "–",
+    }
+    words = re.findall(r"\b[a-zäöüß]{3,}\b", all_text)
     word_freq = Counter(w for w in words if w not in stopwords)
-    top_words = pd.DataFrame(word_freq.most_common(20), columns=['Wort', 'Häufigkeit'])
-    fig3 = px.bar(top_words, x='Häufigkeit', y='Wort', orientation='h',
-                  color='Häufigkeit', color_continuous_scale='Blues')
-    fig3.update_layout(coloraxis_showscale=False, yaxis=dict(autorange='reversed'))
-    st.plotly_chart(fig3, use_container_width=True)
+    top_words = pd.DataFrame(word_freq.most_common(30), columns=["Wort", "Häufigkeit"])
+    fig = px.bar(top_words.sort_values("Häufigkeit"), x="Häufigkeit", y="Wort",
+                 orientation="h", color="Häufigkeit", color_continuous_scale="Blues",
+                 text_auto=True)
+    fig.update_layout(coloraxis_showscale=False, plot_bgcolor="rgba(0,0,0,0)", height=600)
+    st.plotly_chart(fig, use_container_width=True)
 
 # ─────────────────────────────────────────────
 # FOOTER
 # ─────────────────────────────────────────────
 st.markdown("---")
-st.caption("REVOIC Clockify Insights · Gebaut mit ❤️ und Streamlit · Daten: Jan 2022 – Feb 2026")
-
+st.caption("⏱️ Clockify Insights · Gebaut mit Streamlit & Plotly · Daten aus Clockify CSV-Export")
