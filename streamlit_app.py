@@ -50,29 +50,20 @@ def load_data(path) -> pd.DataFrame:
 
     df.columns = df.columns.str.strip()
 
-    # Spalten-Mapping Deutsch → intern
     col_map = {
-        # Benutzer
         "Benutzer": "user", "User": "user", "Nutzer": "user",
-        # Kunde
         "Kunde": "client", "Client": "client",
-        # Projekt
         "Projekt": "project", "Project": "project",
-        # Beschreibung
         "Beschreibung": "description", "Description": "description",
-        # Abrechenbar
         "Abrechenbar": "billable", "Billable": "billable",
-        # Startdatum
         "Startdatum": "start_date", "Start Date": "start_date", "Datum": "start_date",
-        # Startzeit
         "Startzeit": "start_time", "Start Time": "start_time",
-        # Dauer (Dezimal)
         "Dauer (Dezimalzahl)": "duration_h", "Duration (decimal)": "duration_h",
+        "Dauer (dezimal)": "duration_h",
         "Dauer (h)": "duration_h",
     }
     df.rename(columns={k: v for k, v in col_map.items() if k in df.columns}, inplace=True)
 
-    # Dauer sicherstellen
     if "duration_h" not in df.columns:
         for c in df.columns:
             if "dauer" in c.lower() or "duration" in c.lower():
@@ -87,7 +78,6 @@ def load_data(path) -> pd.DataFrame:
         .fillna(0)
     )
 
-    # Datum parsen
     if "start_date" in df.columns:
         df["date"] = pd.to_datetime(df["start_date"], dayfirst=True, errors="coerce")
     else:
@@ -97,21 +87,25 @@ def load_data(path) -> pd.DataFrame:
     df["month"]   = df["date"].dt.to_period("M").astype(str)
     df["quarter"] = df["date"].dt.to_period("Q").astype(str)
     df["weekday"] = df["date"].dt.day_name()
-    df["hour"]    = df["date"].dt.hour if "start_time" not in df.columns else None
 
     if "start_time" in df.columns:
         df["hour"] = pd.to_datetime(
-            df["start_time"].astype(str), format="%H:%M:%S", errors="coerce"
+            df["start_time"].astype(str), format="%H:%M", errors="coerce"
         ).dt.hour
+        # fallback: H:M:S
+        mask = df["hour"].isna()
+        df.loc[mask, "hour"] = pd.to_datetime(
+            df.loc[mask, "start_time"].astype(str), format="%H:%M:%S", errors="coerce"
+        ).dt.hour
+    else:
+        df["hour"] = df["date"].dt.hour
 
-    # Abrechenbar normalisieren
     if "billable" in df.columns:
         df["billable"] = df["billable"].astype(str).str.strip().str.lower()
         df["is_billable"] = df["billable"].isin(["ja", "yes", "true", "1", "wahr"])
     else:
         df["is_billable"] = False
 
-    # Intern-Flag (Kunde enthält eigenen Firmennamen)
     if "client" in df.columns:
         df["client"] = df["client"].fillna("Kein Kunde").astype(str).str.strip()
         internal_keywords = ["intern", "internal", "revoic", "eigene", "administration"]
@@ -122,30 +116,16 @@ def load_data(path) -> pd.DataFrame:
         df["client"] = "Unbekannt"
         df["is_internal"] = False
 
-    if "project" not in df.columns:
-        df["project"] = "Unbekannt"
-    else:
-        df["project"] = df["project"].fillna("Kein Projekt").astype(str).str.strip()
-
-    if "user" not in df.columns:
-        df["user"] = "Unbekannt"
-    else:
-        df["user"] = df["user"].fillna("Unbekannt").astype(str).str.strip()
-
-    if "description" not in df.columns:
-        df["description"] = ""
-    else:
-        df["description"] = df["description"].fillna("").astype(str)
+    df["project"]     = df["project"].fillna("Kein Projekt").astype(str).str.strip() if "project" in df.columns else "Unbekannt"
+    df["user"]        = df["user"].fillna("Unbekannt").astype(str).str.strip() if "user" in df.columns else "Unbekannt"
+    df["description"] = df["description"].fillna("").astype(str) if "description" in df.columns else ""
 
     return df
 
 # ─────────────────────────────────────────────
 # SIDEBAR
 # ─────────────────────────────────────────────
-st.sidebar.image(
-    "https://via.placeholder.com/240x60/2d6a9f/ffffff?text=⏱️+Clockify+Insights",
-    use_container_width=True,
-)
+st.sidebar.markdown("# ⏱️ Clockify Insights")
 st.sidebar.markdown("---")
 
 uploaded = st.sidebar.file_uploader("📁 Clockify CSV hochladen", type=["csv"])
@@ -160,7 +140,6 @@ if not uploaded:
 
 df_raw = load_data(uploaded)
 
-# ── Filter ──
 st.sidebar.markdown("### 🔍 Filter")
 
 years = sorted(df_raw["year"].dropna().unique().astype(int).tolist())
@@ -178,7 +157,6 @@ gran_col = {"Monat": "month", "Quartal": "quarter", "Jahr": "year"}[granularity]
 st.sidebar.markdown("---")
 st.sidebar.caption(f"📊 {len(df_raw):,} Einträge geladen")
 
-# ── Gefilterter DataFrame ──
 df = df_raw[
     df_raw["year"].isin(sel_years) &
     df_raw["user"].isin(sel_users) &
@@ -325,7 +303,7 @@ with tabs[1]:
         st.subheader("% Abrechenbar – Effizienztrend")
         ts_pct = (
             df.groupby(gran_col)
-            .apply(lambda x: x["is_billable"].mean() * 100)
+            .apply(lambda x: x["is_billable"].mean() * 100, include_groups=False)
             .reset_index(name="pct_billable")
             .sort_values(gran_col)
         )
@@ -374,7 +352,7 @@ with tabs[2]:
         st.subheader("% Abrechenbar pro Person")
         bill_user = (
             df.groupby("user")
-            .apply(lambda x: x["is_billable"].mean() * 100)
+            .apply(lambda x: x["is_billable"].mean() * 100, include_groups=False)
             .reset_index(name="pct")
             .sort_values("pct", ascending=True)
         )
@@ -517,7 +495,6 @@ with tabs[4]:
         .groupby([gran_col, "project"])["duration_h"].sum()
         .reset_index().sort_values(gran_col)
     )
-    # Anteil berechnen
     totals = ts_proj.groupby(gran_col)["duration_h"].sum().rename("total")
     ts_proj = ts_proj.join(totals, on=gran_col)
     ts_proj["anteil"] = ts_proj["duration_h"] / ts_proj["total"] * 100
@@ -566,7 +543,7 @@ with tabs[5]:
         st.subheader("% Interne Zeit pro Periode")
         pct_int_ts = (
             df.groupby(gran_col)
-            .apply(lambda x: x["is_internal"].mean() * 100)
+            .apply(lambda x: x["is_internal"].mean() * 100, include_groups=False)
             .reset_index(name="pct_intern")
             .sort_values(gran_col)
         )
@@ -586,7 +563,7 @@ with tabs[5]:
             .sort_values(ascending=False).head(12).reset_index()
         )
         if int_proj.empty:
-            st.info("Keine internen Buchungen gefunden. Prüfe den Kundennamen (Stichwort: 'intern', 'internal' oder Firmenname).")
+            st.info("Keine internen Buchungen gefunden.")
         else:
             fig = px.pie(int_proj, values="duration_h", names="project",
                          color_discrete_sequence=PALETTE, hole=0.4)
@@ -600,43 +577,38 @@ with tabs[6]:
 
     col1, col2, col3 = st.columns(3)
 
-    # Frühaufsteher
     with col1:
         st.markdown("### 🌅 Frühaufsteher")
         if "hour" in df.columns and df["hour"].notna().any():
             early = df[df["hour"] < 7]
             if not early.empty:
                 top_early = early.groupby("user")["duration_h"].count().idxmax()
-                count_early = early.shape[0]
-                st.metric("Buchungen vor 7 Uhr", count_early)
+                st.metric("Buchungen vor 7 Uhr", early.shape[0])
                 st.metric("Fleißigste Frühaufsteherin", top_early)
             else:
                 st.info("Keine Buchungen vor 7 Uhr.")
         else:
             st.info("Keine Zeitdaten verfügbar.")
 
-    # Nachteulen
     with col2:
         st.markdown("### 🦉 Nachteulen")
         if "hour" in df.columns and df["hour"].notna().any():
             late = df[df["hour"] >= 21]
             if not late.empty:
                 top_late = late.groupby("user")["duration_h"].count().idxmax()
-                count_late = late.shape[0]
-                st.metric("Buchungen ab 21 Uhr", count_late)
+                st.metric("Buchungen ab 21 Uhr", late.shape[0])
                 st.metric("Fleißigste Nachteule", top_late)
             else:
                 st.info("Keine Buchungen ab 21 Uhr.")
         else:
             st.info("Keine Zeitdaten verfügbar.")
 
-    # Wochenend-Warriors
     with col3:
         st.markdown("### 🏋️ Wochenend-Warriors")
         weekend = df[df["weekday"].isin(["Saturday", "Sunday"])]
         if not weekend.empty:
             top_wknd = weekend.groupby("user")["duration_h"].sum().idxmax()
-            h_wknd = weekend["duration_h"].sum()
+            h_wknd   = weekend["duration_h"].sum()
             st.metric("Wochenend-Stunden gesamt", f"{h_wknd:.0f} h")
             st.metric("Wochenend-Champion", top_wknd)
         else:
@@ -647,25 +619,34 @@ with tabs[6]:
 
     with col4:
         st.markdown("### ⚡ Kürzeste & längste Buchung")
-        shortest = df.loc[df[df["duration_h"] > 0]["duration_h"].idxmin()]
-        longest  = df.loc[df["duration_h"].idxmax()]
-        st.info(
-            f"**Kürzeste:** {shortest['duration_h']*60:.1f} min  \n"
-            f"Person: {shortest['user']}  \n"
-            f"Projekt: {shortest['project']}"
-        )
-        st.success(
-            f"**Längste:** {longest['duration_h']:.1f} h  \n"
-            f"Person: {longest['user']}  \n"
-            f"Projekt: {longest['project']}"
-        )
+        pos_df = df[df["duration_h"] > 0]
+        if not pos_df.empty and pos_df["duration_h"].notna().any():
+            shortest = df.loc[pos_df["duration_h"].idxmin()]
+            st.info(
+                f"**Kürzeste:** {shortest['duration_h']*60:.1f} min  \n"
+                f"Person: {shortest['user']}  \n"
+                f"Projekt: {shortest['project']}"
+            )
+        else:
+            st.info("Keine positiven Buchungen vorhanden.")
+
+        all_df = df[df["duration_h"].notna()]
+        if not all_df.empty:
+            longest = df.loc[all_df["duration_h"].idxmax()]
+            st.success(
+                f"**Längste:** {longest['duration_h']:.1f} h  \n"
+                f"Person: {longest['user']}  \n"
+                f"Projekt: {longest['project']}"
+            )
 
         st.markdown("### 🏆 Produktivster Tag")
-        best_day = (
-            df.groupby(df["date"].dt.date)["duration_h"].sum().idxmax()
-        )
-        best_h = df.groupby(df["date"].dt.date)["duration_h"].sum().max()
-        st.success(f"**{best_day}** mit {best_h:.0f} Stunden im Team")
+        day_series = df.groupby(df["date"].dt.date)["duration_h"].sum()
+        if not day_series.empty:
+            best_day = day_series.idxmax()
+            best_h   = day_series.max()
+            st.success(f"**{best_day}** mit {best_h:.0f} Stunden im Team")
+        else:
+            st.info("Keine Tagesdaten verfügbar.")
 
     with col5:
         st.markdown("### 🕐 Buchungen nach Tageszeit")
@@ -686,7 +667,7 @@ with tabs[6]:
         "und", "der", "die", "das", "für", "mit", "an", "auf", "in", "zu",
         "von", "bei", "ist", "im", "am", "ein", "eine", "einer", "einen",
         "des", "dem", "den", "ich", "wir", "sie", "es", "er", "hat", "haben",
-        "the", "and", "for", "with", "of", "in", "to", "a", "an", "on", "is",
+        "the", "and", "for", "with", "of", "to", "a", "on", "is",
         "nan", "", "-", "–",
     }
     words = re.findall(r"\b[a-zäöüß]{3,}\b", all_text)
