@@ -53,10 +53,13 @@ def load_data(f) -> pd.DataFrame:
                 df.rename(columns={c: "duration_h"}, inplace=True)
                 break
 
+    # ── Doppelte Spalten entfernen ──────────────────────────────────────────
+    # (passiert wenn z.B. "Dauer (dezimal)" UND "Dauer (h)" beide zu duration_h werden)
+    df = df.loc[:, ~df.columns.duplicated(keep="first")]
+
     # ── Dauer parsen ────────────────────────────────────────────────────────
-    # Strategie: IMMER über to_numeric mit Komma-Fallback – NIE .str auf unbekanntem Typ
     if "duration_h" in df.columns:
-        col = df["duration_h"]
+        col = df["duration_h"].squeeze()  # DataFrame → Series falls doppelt
         result = pd.to_numeric(col, errors="coerce")
         # Falls alles NaN: Spalte ist als String mit Komma gespeichert
         if result.isna().mean() > 0.9:
