@@ -5,6 +5,16 @@ import numpy as np
 from collections import Counter
 import re
 
+# ── Deutsche Zahlenformatierung ─────────────────────────────────────────────
+def de(n, decimals=0):
+    """Formatiert Zahlen auf Deutsch: 1.234,56"""
+    if pd.isna(n):
+        return "–"
+    formatted = f"{n:,.{decimals}f}"          # US: 1,234.56
+    formatted = formatted.replace(",", "X").replace(".", ",").replace("X", ".")
+    return formatted
+
+
 st.set_page_config(page_title="Clockify Insights", page_icon="⏱️", layout="wide")
 
 st.markdown("""
@@ -255,11 +265,11 @@ with tabs[0]:
     for col, lbl, val, sub in zip(
         [c1,c2,c3,c4,c5],
         ["⏱️ Externe Stunden","💰 Abrechenbar (extern)","✅ % Abrechenbar","🏢 Kunden","📋 Buchungen"],
-        [f"{df_ext['duration_h'].sum():,.0f} h",
-         f"{df_ext[df_ext['is_billable']]['duration_h'].sum():,.0f} h",
+        [f"{de(df_ext['duration_h'].sum())} h",
+         f"{de(df_ext[df_ext['is_billable']]['duration_h'].sum())} h",
          f"{df_ext['is_billable'].mean()*100:.1f} %",
          str(df_ext['client'].nunique()),
-         f"{len(df_ext):,}"],
+         f"{de(len(df_ext))}"],
         ["Externe Kunden gesamt","Extern & abrechenbar","Anteil abrechenbar","Einzigartige Kunden","Einträge"]
     ):
         col.markdown(f'<div class="metric-card"><h3>{lbl}</h3><h1>{val}</h1><p>{sub}</p></div>',
@@ -446,9 +456,9 @@ with tabs[3]:
     sel_c = st.selectbox("Kunde wählen", sorted(df_ext["client"].unique()))
     dfc = df_ext[df_ext["client"]==sel_c]
     m1,m2,m3,m4 = st.columns(4)
-    m1.metric("Gesamt-Stunden", f"{dfc['duration_h'].sum():.1f} h")
-    m2.metric("Abrechenbar", f"{dfc[dfc['is_billable']]['duration_h'].sum():.1f} h")
-    m3.metric("Buchungen", f"{len(dfc):,}")
+    m1.metric("Gesamt-Stunden", f"{de(dfc['duration_h'].sum(), 1)} h")
+    m2.metric("Abrechenbar", f"{de(dfc[dfc['is_billable']]['duration_h'].sum(), 1)} h")
+    m3.metric("Buchungen", f"{de(len(dfc))}")
     m4.metric("Aktive Monate", dfc["month"].nunique())
     cc1, cc2 = st.columns(2)
     with cc1:
@@ -550,10 +560,10 @@ with tabs[6]:
     ask_sem_h  = df_int[df_int["revoic_kat"].isin(["🎤 ASK / Amazon Sales Kongress","🎓 Seminare"])]["duration_h"].sum()
 
     m1,m2,m3,m4 = st.columns(4)
-    m1.metric("Interne Stunden gesamt", f"{total_int:,.0f} h")
-    m2.metric("Davon abrechenbar (Seminare/ASK)", f"{bill_int:,.0f} h")
-    m3.metric("Seminare & ASK gesamt", f"{ask_sem_h:,.0f} h")
-    m4.metric("Interne Buchungen", f"{len(df_int):,}")
+    m1.metric("Interne Stunden gesamt", f"{de(total_int)} h")
+    m2.metric("Davon abrechenbar (Seminare/ASK)", f"{de(bill_int)} h")
+    m3.metric("Seminare & ASK gesamt", f"{de(ask_sem_h)} h")
+    m4.metric("Interne Buchungen", f"{de(len(df_int))}")
 
     st.markdown("---")
     st.subheader("Interne Zeit nach Kategorie")
@@ -632,8 +642,8 @@ with tabs[6]:
     sel_kat = st.selectbox("Bereich", sorted(df_int["revoic_kat"].unique()))
     dk = df_int[df_int["revoic_kat"] == sel_kat]
     k1,k2,k3 = st.columns(3)
-    k1.metric("Stunden", f"{dk['duration_h'].sum():.1f} h")
-    k2.metric("Buchungen", f"{len(dk):,}")
+    k1.metric("Stunden", f"{de(dk['duration_h'].sum(), 1)} h")
+    k2.metric("Buchungen", f"{de(len(dk))}")
     k3.metric("Personen beteiligt", dk["user"].nunique())
 
     top_desc = dk.groupby("description")["duration_h"].sum().nlargest(15).sort_values().reset_index()
@@ -658,8 +668,8 @@ with tabs[7]:
             if not early.empty:
                 top_e = early.groupby("user")["duration_h"].agg(["sum","count"])
                 nm = top_e["count"].idxmax()
-                st.metric("Buchungen vor 7 Uhr", f"{early.shape[0]:,}")
-                st.metric("Stunden vor 7 Uhr", f"{early['duration_h'].sum():.1f} h")
+                st.metric("Buchungen vor 7 Uhr", f"{de(early.shape[0])}")
+                st.metric("Stunden vor 7 Uhr", f"{de(early['duration_h'].sum(), 1)} h")
                 st.metric("Top Person", nm)
                 st.caption(f"{top_e.loc[nm,'count']:.0f} Buchungen · {top_e.loc[nm,'sum']:.1f} h")
     with c2:
@@ -669,8 +679,8 @@ with tabs[7]:
             if not late.empty:
                 top_l = late.groupby("user")["duration_h"].agg(["sum","count"])
                 nm = top_l["count"].idxmax()
-                st.metric("Buchungen ab 21 Uhr", f"{late.shape[0]:,}")
-                st.metric("Stunden ab 21 Uhr", f"{late['duration_h'].sum():.1f} h")
+                st.metric("Buchungen ab 21 Uhr", f"{de(late.shape[0])}")
+                st.metric("Stunden ab 21 Uhr", f"{de(late['duration_h'].sum(), 1)} h")
                 st.metric("Top Person", nm)
                 st.caption(f"{top_l.loc[nm,'count']:.0f} Buchungen · {top_l.loc[nm,'sum']:.1f} h")
     with c3:
@@ -679,8 +689,8 @@ with tabs[7]:
         if not we.empty:
             top_w = we.groupby("user")["duration_h"].agg(["sum","count"])
             nm = top_w["sum"].idxmax()
-            st.metric("Wochenend-Stunden", f"{we['duration_h'].sum():.0f} h")
-            st.metric("Buchungen", f"{len(we):,}")
+            st.metric("Wochenend-Stunden", f"{de(we['duration_h'].sum())} h")
+            st.metric("Buchungen", f"{de(len(we))}")
             st.metric("Champion", nm)
             st.caption(f"{top_w.loc[nm,'count']:.0f} Buchungen · {top_w.loc[nm,'sum']:.1f} h")
 
